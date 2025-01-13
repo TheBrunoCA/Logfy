@@ -2,6 +2,14 @@
 
 class Logfy {
 
+    __New(_fileName, _customLogDir?, _logPruning := false, ntfyHost := '', ntfyChannels := []) {
+        this.thisFileName := _fileName
+        this.logFileDir := _customLogDir ?? Logfy._defaultLogDir
+        this.ntfyHost := ntfyHost
+        this.ntfyChannels := ntfyChannels
+        this.setLogPruning(_logPruning)
+    }
+
     static _logLevels := Map('DEBUG', 1, 'INFO', 2, 'WARN', 3, 'ERROR', 4, 'FATAL', 5)
     getLogLevels() => Logfy._logLevels
     static _selectedLogLevel := 'DEBUG'
@@ -46,12 +54,6 @@ class Logfy {
     }
     getCustomPlaceholders() => Logfy._customPlaceholders
 
-    __New(_fileName, _customLogDir?, _logPruning := false) {
-        this.thisFileName := _fileName
-        this.logFileDir := _customLogDir ?? Logfy._defaultLogDir
-        this.setLogPruning(_logPruning)
-    }
-
     _formatMessage(message, level) {
         msg := this.getMessagePlaceholder()
         msg := StrReplace(msg, '{{message}}', message)
@@ -92,12 +94,28 @@ class Logfy {
         }
     }
 
+    _sendToNtfy(message, level, channel) {
+        if !this.ntfyHost {
+            return
+        }
+        req := ComObject('WinHttp.WinHttpRequest.5.1')
+        req.Open('POST', this.ntfyHost '/' channel, false)
+        req.SetRequestHeader('Content-Type', 'application/json')
+        req.SetRequestHeader('priority', this.getLogLevels()[level])
+        req.SetRequestHeader('title', this.thisFileName ' - ' level)
+        req.Send(message)
+    }
+
     Log(message, level := 'INFO') {
         if !this.validateLogLevel(level)
             throw Error('Invalid log level')
         if this.getLogLevels()[level] < this.getLogLevels()[this.getSelectedLogLevel()]
             return
-        this._write_log_entry(this._formatMessage(message, level))
+        formatedMessage := this._formatMessage(message, level)
+        this._write_log_entry(formatedMessage)
+        for channel in this.ntfyChannels {
+            this._sendToNtfy(formatedMessage, level, channel)
+        }
     }
 
     Debug(msg) => this.Log(msg, 'DEBUG')
