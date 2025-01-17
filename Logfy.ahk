@@ -1,154 +1,103 @@
 #Requires AutoHotkey v2.0
 
-class Logfy {
-
-    static _logLevels := Map('DEBUG', 1, 'INFO', 2, 'WARN', 3, 'ERROR', 4, 'FATAL', 5)
-    getLogLevels() => Logfy._logLevels
-    static _selectedLogLevel := 'DEBUG'
-    setSelectedLogLevel(level) {
-        if !this.validateLogLevel(level)
-            throw Error('Invalid log level')
-        Logfy._selectedLogLevel := level
-    }
-    validateLogLevel(level) => Logfy._logLevels.Has(level)
-    getSelectedLogLevel() => Logfy._selectedLogLevel
-
-    static _defaultLogDir := A_WorkingDir '\Logs\'
-    setDefaultLogDir(path) {
-        if !this.validateLogDir(path)
-            throw Error('Invalid log file path')
-        Logfy._defaultLogDir := path
-    }
-    getDefaultLogDir() => Logfy._defaultLogDir
-    validateLogDir(path) {
-        SplitPath(path, , &OutDir)
-        if !DirExist(OutDir) {
+Class Logfy {
+    Class Utils {
+        static ValidateFilePath(path) {
+            SplitPath(path, &fileName, &OutDir)
             try {
-                DirCreate(OutDir)
-            }
-            catch as e {
-                return false
+                if not DirExist(OutDir) {
+                    DirCreate(OutDir)
+                }
+                return OutDir '\' fileName
+            } catch Error as e {
+                throw Error('Invalid log file path. ' e.Message)
             }
         }
-        return true
+        static SendNtfy(message, title, url, topic, priority) {
+            args := 'curl -H "X-Priority: {5}" -H "X-Title: {2}" -d "{1}" {3}/{4} -s'
+            args := Format(args, message, title, url, topic, priority)
+            Run(args, , 'hide')
+        }
+        static WriteToFile(message, path) {
+            script := A_ComSpec ' /c echo "{1}" >> "{2}"'
+            script := Format(script, message, path)
+            Run(script,, 'hide')
+        }
     }
-
-    static _messagePlaceholder := '[ {{timestamp}} ] | [ {{level}} ] | [ {{thisFileName}} ] -> {{message}}'
-    setMessagePlaceholder(placeholder) => Logfy._messagePlaceholder := placeholder
-    getMessagePlaceholder() => Logfy._messagePlaceholder
-
-    static _customPlaceholders := Map()
-    addCustomPlaceholder(placeholder, valueOrCallback) {
-        if valueOrCallback is Func
-            Logfy._customPlaceholders[placeholder] := valueOrCallback()
-        else
-            Logfy._customPlaceholders[placeholder] := valueOrCallback
+    static LogLevels := {
+        DEBUG: {value: 1, name: 'DEBUG'},
+        INFO: {value: 2, name: 'INFO'},
+        WARN: {value: 3, name: 'WARN'},
+        ERROR: {value: 4, name: 'ERROR'},
+        FATAL: {value: 5, name: 'FATAL'}
     }
-    getCustomPlaceholders() => Logfy._customPlaceholders
+    static GlobalSelectedLogLevel := Logfy.LogLevels.DEBUG
+    SelectedLogLevel := 0
+    static GlobalLogFiles := [A_WorkingDir '\Logs\' A_ComputerName '\' A_Year '-' A_MM '-' A_DD '.txt']
+    LogFiles := 0
+    static GlobalNtfyUrl := ''
+    NtfyUrl := 0
+    static GlobalNtfyTopic := ''
+    NtfyTopic := 0
+    static GlobalNtfyTitle := ''
+    NtfyTitle := 0
+    static GlobalUseLogLevelAsNtfyPriority := true
+    UseLogLevelAsNtfyPriority := 0
+    static GlobalDefaultNtfyPriority := 3
+    DefaultNtfyPriority := 0
+    static GlobalMessagePlaceholder := '[ {{timestamp}} ] [ {{level}} ] -> {{message}}'
+    MessagePlaceholder := 0
+    static GlobalCustomPlaceholders := {}
+    CustomPlaceholders := 0
 
-    __New(_fileName, _customLogDir?, _logPruning := false) {
-        this.thisFileName := _fileName
-        this.logFileDir := _customLogDir ?? Logfy._defaultLogDir
-        this.setLogPruning(_logPruning)
-    }
-
-    _formatMessage(message, level) {
-        msg := this.getMessagePlaceholder()
+    _FormatMessage(message, level) {
+        msg := this.MessagePlaceholder ? this.MessagePlaceholder : Logfy.GlobalMessagePlaceholder
         msg := StrReplace(msg, '{{message}}', message)
-        msg := StrReplace(msg, '{{level}}', level)
+        msg := StrReplace(msg, '{{level}}', level.name)
         msg := StrReplace(msg, '{{timestamp}}', FormatTime('yyyy-MM-dd-hh-mm-ss', A_Now))
-        msg := StrReplace(msg, '{{thisFileName}}', this.thisFileName)
-        for k, v in this.getCustomPlaceholders() {
-            if v is Func
-                msg := StrReplace(msg, '{{' k '}}', v.Call())
-            else
-                msg := StrReplace(msg, '{{' k '}}', v)
+        cp := this.CustomPlaceholders ? this.CustomPlaceholders : Logfy.GlobalCustomPlaceholders
+        for prop, value in cp.OwnProps() {
+            msg := StrReplace(msg, '{{' prop '}}', value)
         }
         return msg
     }
-
-    _getValidLogPath() {
-        if SubStr(this.logFileDir, -1, 1) != '\'
-            this.logFileDir .= '\'
-        out := this.logFileDir A_YYYY '\' A_MM '\' A_DD '\' this.thisFileName '.txt'
-        SplitPath(out,,&OutDir)
-        if !DirExist(OutDir) {
-            try {
-                DirCreate(OutDir)
-            }
-            catch as e {
-                return false
-            }
+    _WriteEntry(message) {
+        paths := this.LogFiles ? this.LogFiles : Logfy.GlobalLogFiles
+        for i, p in paths {
+            p := Logfy.Utils.ValidateFilePath(p)
+            Logfy.Utils.WriteToFile(message, p)
         }
-        return out
     }
-
-    _write_log_entry(entry) {
-        out := this._getValidLogPath()
-        if !out
+    Log(message, level := Logfy.LogLevels.INFO) {
+        selLogLevel := this.SelectedLogLevel ? this.SelectedLogLevel : Logfy.GlobalSelectedLogLevel
+        if selLogLevel.value > level.value {
             return
+        }
+
+        msg := this._FormatMessage(message, level)
         try {
-            FileAppend(entry '`n', out, 'UTF-8')
+            this.LogNtfy(msg, level)
+            this._WriteEntry(msg)
+        } catch Error as e {
+            FileAppend('Error logging: ' e.Message '`n', A_Temp '\' A_Now 'LogfyError.txt')
+            this.LogNtfy('Error logging: ' e.Message, level)
+        }
+    }
+    LogNtfy(message, level) {
+        if this.NtfyUrl and This.NtfyTopic {
+            logLevelPriority := this.UseLogLevelAsNtfyPriority ? this.UseLogLevelAsNtfyPriority : Logfy.GlobalUseLogLevelAsNtfyPriority
+            if logLevelPriority {
+                priority := level.value
+            } else {
+                priority := this.DefaultNtfyPriority ? this.DefaultNtfyPriority : Logfy.GlobalDefaultNtfyPriority
+            }
+            Logfy.Utils.SendNtfy( message, this.NtfyTitle, this.NtfyUrl, this.NtfyTopic, priority)
         }
     }
 
-    Log(message, level := 'INFO') {
-        if !this.validateLogLevel(level)
-            throw Error('Invalid log level')
-        if this.getLogLevels()[level] < this.getLogLevels()[this.getSelectedLogLevel()]
-            return
-        this._write_log_entry(this._formatMessage(message, level))
-    }
-
-    Debug(msg) => this.Log(msg, 'DEBUG')
-    Info(msg) => this.Log(msg, 'INFO')
-    Warn(msg) => this.Log(msg, 'WARN')
-    Error(msg) => this.Log(msg, 'ERROR')
-    Fatal(msg) => this.Log(msg, 'FATAL')
-
-    static _isLogPruningEnabled := false
-    static _isTimerAlreadySet := false
-    setLogPruning(enabled := true) {
-        SetTimer(this._pruneLogs.Bind(this), this.getLogPruningInterval() * (enabled and not Logfy._isTimerAlreadySet))
-        Logfy._isTimerAlreadySet := enabled
-        Logfy._isLogPruningEnabled := enabled
-    }
-    getLogPruning() => Logfy._isLogPruningEnabled
-
-    static _logPruningInterval := 1000*60*5
-    setLogPruningInterval(interval := 1000*60*5) => Logfy._logPruningInterval := interval
-    getLogPruningInterval() => Logfy._logPruningInterval
-
-    static _maxLogSizeInMB := 0
-    setMaxLogSizeInMB(sizeInMB := 0) => Logfy._maxLogSizeInMB := sizeInMB
-    getMaxLogSizeInMB() => Logfy._maxLogSizeInMB
-
-    static _maxLogAgeInDays := 0
-    setMaxLogAgeInDays(ageInDays := 0) => Logfy._maxLogAgeInDays := ageInDays
-    getMaxLogAgeInDays() => Logfy._maxLogAgeInDays
-
-    _pruneLogs(*) {
-        if !this.getLogPruning()
-            return
-        if !this.getMaxLogSizeInMB() and !this.getMaxLogAgeInDays()
-            return
-        loop files this.logFileDir, 'FR' {
-            if this.getMaxLogSizeInMB() and FileGetSize(A_LoopFileFullPath, 'M') > this.getMaxLogSizeInMB() {
-                try {
-                    FileDelete(A_LoopFileFullPath)
-                }
-                catch as e {
-                    this.Error('Failed to prune log file: ' . A_LoopFileFullPath . ' (' . e.Message . ')')
-                }
-            }
-            if this.getMaxLogAgeInDays() and A_Now > DateAdd(FileGetTime(A_LoopFileFullPath, 'C'), this.getMaxLogAgeInDays(), 'D') {
-                try {
-                    FileDelete(A_LoopFileFullPath)
-                }
-                catch as e {
-                    this.Error('Failed to prune log file: ' . A_LoopFileFullPath . ' (' . e.Message . ')')
-                }
-            }
-        }
-    }
+    Debug(msg) => this.Log(msg, Logfy.LogLevels.DEBUG)
+    Info(msg) => this.Log(msg, Logfy.LogLevels.INFO)
+    Warn(msg) => this.Log(msg, Logfy.LogLevels.WARN)
+    Error(msg) => this.Log(msg, Logfy.LogLevels.ERROR)
+    Fatal(msg) => this.Log(msg, Logfy.LogLevels.FATAL)
 }
